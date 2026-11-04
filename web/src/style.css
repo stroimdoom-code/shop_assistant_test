@@ -1,0 +1,73 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #233a32;
+  background: #f1f3ef;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+button:focus-visible, textarea:focus-visible { outline: 3px solid #75a997; outline-offset: 3px; }
+#root { min-height: 100dvh; display: grid; place-items: center; padding: 32px 24px; }
+.chat-shell {
+  width: min(100%, 760px);
+  height: min(860px, calc(100dvh - 64px));
+  min-height: 340px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: #fff;
+  border: 1px solid #dfe6e0;
+  border-radius: 24px;
+  box-shadow: 0 16px 64px #203d2e0a;
+  overflow: hidden;
+}
+.chat-header { display: flex; align-items: center; gap: 14px; padding: 24px 28px; border-bottom: 1px solid #edf0ec; }
+.assistant-mark { display: grid; place-items: center; width: 46px; height: 46px; background: #eaf2ec; color: #235c4b; border-radius: 15px; flex-shrink: 0; }
+.assistant-mark svg { width: 25px; height: 25px; }
+h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.4px; }
+.chat-header p { margin: 5px 0 0; color: #708078; font-size: 13px; }
+.conversation { overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
+.message-list { display: flex; flex-direction: column; gap: 20px; padding: 28px; min-height: 100%; }
+.welcome { margin: auto; padding: 45px 0; text-align: center; }
+.welcome-label { color: #537d6c; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; }
+.welcome h2 { font-size: 25px; font-weight: 550; line-height: 1.35; letter-spacing: -.6px; margin: 16px 0 10px; }
+.welcome p { color: #7c8981; font-size: 14px; margin: 0; }
+.message { max-width: 86%; padding: 14px 18px 16px; border-radius: 18px; }
+.message-user { align-self: flex-end; background: #235c4b; color: #fff; border-bottom-right-radius: 5px; }
+.message-assistant { align-self: flex-start; background: #f2f5f1; border-bottom-left-radius: 5px; }
+.message-author { display: block; font-size: 11px; font-weight: 650; margin-bottom: 6px; opacity: .75; }
+.message p { margin: 0; font-size: 15px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.status { font-size: 13px; color: #6c7d73; margin: 0; text-align: center; }
+.waiting { text-align: left; padding-left: 5px; }
+.composer { border-top: 1px solid #edf0ec; padding: 20px 28px 22px; }
+.composer label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 10px; }
+.input-row { display: flex; align-items: flex-end; gap: 12px; padding: 12px; border: 1px solid #dce4dd; border-radius: 16px; background: #fcfdfb; }
+.input-row:focus-within { border-color: #75a997; }
+textarea { flex: 1; min-width: 0; width: 100%; max-height: 150px; resize: vertical; border: 0; background: transparent; color: inherit; line-height: 1.5; padding: 2px 4px; outline: 0; }
+textarea::placeholder { color: #8e9a92; }
+textarea:focus-visible { outline: none; }
+.send-button { width: 42px; height: 42px; flex-shrink: 0; display: grid; place-items: center; border: 0; border-radius: 12px; background: #235c4b; color: white; }
+.send-button:not(:disabled):hover { background: #184c3c; }
+.send-button:disabled { background: #e3e9e3; color: #98a59b; }
+.send-button svg { width: 22px; height: 22px; }
+.input-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; color: #7d8b81; font-size: 11px; line-height: 1.5; }
+#character-count { white-space: nowrap; }
+.error-notice { margin-bottom: 16px; padding: 12px 14px; background: #fcf0e8; color: #834323; border-radius: 12px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.error-notice p { margin: 0; }
+.error-notice p + p { margin-top: 6px; }
+.retry-button { padding: 0; margin-top: 8px; color: inherit; border: 0; background: transparent; text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 600px) {
+  #root { padding: 0; }
+  .chat-shell { width: 100%; height: 100dvh; border: 0; border-radius: 0; min-height: 0; }
+  .chat-header { padding: 20px; }
+  h1 { font-size: 18px; }
+  .message-list { padding: 22px 16px; gap: 16px; }
+  .message { max-width: 92%; }
+  .welcome h2 { font-size: 23px; }
+  .composer { padding: 16px 16px max(16px, env(safe-area-inset-bottom)); }
+  .input-meta { font-size: 10px; }
+}

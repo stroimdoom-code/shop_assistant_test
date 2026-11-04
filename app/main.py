@@ -1,17 +1,19 @@
-"""HTTP API чата: валидация, анонимная cookie, история и безопасные ошибки."""
+"""HTTP API чата, безопасные ошибки и раздача production-сборки React."""
 
 import logging
 import re
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, cast
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
+from starlette.staticfiles import StaticFiles
 
 from app.assistant import AssistantService, AssistantTimeoutError, AssistantUnavailableError
 from app.config import Settings, load_settings
@@ -38,6 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 _COOKIE_NAME = "shop_assistant_session"
 _COOKIE_PATH = "/api/chat"
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
+_WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 _ERRORS = {
     422: (
         "invalid_request",
@@ -139,7 +142,7 @@ def create_app() -> FastAPI:
     """Создать независимый экземпляр HTTP-приложения.
 
     Returns:
-        Приложение с проверкой SQLite при старте, health и двумя маршрутами чата.
+        Приложение с SQLite, API и сборкой web/dist, если она подготовлена.
     """
     application = FastAPI(title="Shop Assistant", version="0.1.0", lifespan=_lifespan)
 
@@ -277,6 +280,26 @@ def create_app() -> FastAPI:
         response.headers["Cache-Control"] = "no-store"
         _apply_cookie(request, response)
         return result
+
+    @application.get("/", response_class=FileResponse, include_in_schema=False)
+    async def web_chat() -> FileResponse:
+        """Открыть собранный React-чат без перенаправления запросов API.
+
+        Returns:
+            Страница Vite из web/dist с проверкой актуальности при загрузке.
+
+        Raises:
+            HTTPException: Сборка отсутствует; API продолжает работать отдельно.
+        """
+        index = _WEB_DIST / "index.html"
+        if not index.is_file():
+            raise HTTPException(status_code=503)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+    # У экрана нет клиентских маршрутов: catch-all не нужен и не скрывает 404 API.
+    assets = _WEB_DIST / "assets"
+    if assets.is_dir():
+        application.mount("/assets", StaticFiles(directory=assets), name="web-assets")
 
     return application
 

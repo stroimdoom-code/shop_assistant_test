@@ -1,4 +1,4 @@
-"""Изолированные проверки HTTP API, cookie, истории, ошибок и запуска FastAPI."""
+"""Проверки HTTP API, сессий, безопасных ошибок и раздачи сборки React через FastAPI."""
 
 import sqlite3
 from collections.abc import Iterator
@@ -512,3 +512,64 @@ def test_history_isolated_by_cookie_and_openapi_contract(
     preflight = client.options("/api/chat/messages", headers={"origin": "https://other.example"})
     assert "access-control-allow-origin" not in preflight.headers
     assert preflight.status_code == 405
+
+
+@pytest.mark.usefixtures("configured_environment")
+def test_production_chat_and_assets_do_not_intercept_api(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Сборка раздаётся только на корне и assets, сохраняя маршруты и ошибки API.
+
+    Args:
+        monkeypatch: Подмена расположения production-сборки.
+        tmp_path: Временный каталог с имитацией результата Vite.
+    """
+    dist = tmp_path / "dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    (dist / "index.html").write_text(
+        '<html lang="ru"><div id="root"></div></html>', encoding="utf-8"
+    )
+    (assets / "chat.js").write_text('const title = "Помощник магазина";', encoding="utf-8")
+    (assets / "chat.css").write_text("body { margin: 0; }", encoding="utf-8")
+    monkeypatch.setattr(main_module, "_WEB_DIST", dist)
+    application = create_app()
+    with TestClient(application) as client:
+        stub = _AssistantStub(application.state.settings)
+        application.dependency_overrides[get_assistant_service] = lambda: stub
+        index = client.get("/")
+        assert index.status_code == 200 and '<div id="root">' in index.text
+        assert index.headers["content-type"].startswith("text/html")
+        assert index.headers["cache-control"] == "no-cache"
+        assert client.get("/assets/chat.js").status_code == 200
+        assert client.get("/assets/chat.css").headers["content-type"].startswith("text/css")
+        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/api/chat/history").json() == {"messages": []}
+        assert client.post("/api/chat/messages", json={"message": "Вопрос"}).status_code == 200
+        assert len(client.get("/api/chat/history").json()["messages"]) == 2
+        assert client.get("/api/missing").status_code == 404
+        assert client.get("/assets/missing.js").status_code == 404
+        assert client.get("/another-page").status_code == 404
+        assert client.get("/assets/%2e%2e/index.html").status_code == 404
+        assert client.get("/openapi.json").status_code == 200
+        assert "/" not in client.get("/openapi.json").json()["paths"]
+
+
+@pytest.mark.usefixtures("configured_environment")
+def test_missing_frontend_build_does_not_prevent_api_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """API работает без Node и сборки; корень безопасно сообщает недоступность чата.
+
+    Args:
+        monkeypatch: Подмена пути на отсутствующую сборку.
+        tmp_path: Изолированный каталог теста.
+    """
+    monkeypatch.setattr(main_module, "_WEB_DIST", tmp_path / "missing-dist")
+    with TestClient(create_app()) as client:
+        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/api/chat/history").json() == {"messages": []}
+        response = client.get("/")
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "service_unavailable"
+        assert "missing-dist" not in response.text
