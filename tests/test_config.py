@@ -19,6 +19,7 @@ def test_default_settings() -> None:
     assert settings.deepseek_max_attempts == 2
     assert settings.sqlite_path == Path("data/shop-assistant.sqlite3")
     assert settings.conversation_ttl_hours == 24
+    assert settings.classifier_context_messages == 5
     assert "example-test-key-not-real" not in repr(settings)
 
 
@@ -50,6 +51,8 @@ def test_missing_key_is_reported_without_validation_details() -> None:
         ("DEEPSEEK_MAX_ATTEMPTS", "3"),
         ("CONVERSATION_TTL_HOURS", "0"),
         ("CONVERSATION_TTL_HOURS", "invalid-sensitive-value"),
+        ("CLASSIFIER_CONTEXT_MESSAGES", "-1"),
+        ("CLASSIFIER_CONTEXT_MESSAGES", "1.5"),
         ("SQLITE_PATH", ""),
         ("SQLITE_PATH", "   "),
     ],
@@ -102,3 +105,18 @@ def test_dotenv_loading_and_environment_priority(
 
     monkeypatch.setenv("DEEPSEEK_TIMEOUT_SECONDS", "20")
     assert load_settings().deepseek_timeout_seconds == 20
+
+
+@pytest.mark.usefixtures("configured_environment")
+@pytest.mark.parametrize("limit", [0, 1, 8])
+def test_classifier_context_limit_from_environment(
+    monkeypatch: pytest.MonkeyPatch, limit: int
+) -> None:
+    """Настройка истории принимает неотрицательные целые числа, включая отключение.
+
+    Args:
+        monkeypatch: Средство временного изменения окружения.
+        limit: Число предыдущих сообщений для классификатора.
+    """
+    monkeypatch.setenv("CLASSIFIER_CONTEXT_MESSAGES", str(limit))
+    assert load_settings().classifier_context_messages == limit

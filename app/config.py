@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         deepseek_max_attempts: Число попыток на сообщение, включая первую, от 1 до 2.
         sqlite_path: Путь к SQLite относительно рабочего каталога.
         conversation_ttl_hours: Срок хранения и неактивности диалога в часах.
+        classifier_context_messages: Максимум предыдущих сообщений для классификации; 0 отключает.
     """
 
     model_config = SettingsConfigDict(
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     deepseek_max_attempts: int = Field(default=2, ge=1, le=2)
     sqlite_path: Path = Path("data/shop-assistant.sqlite3")
     conversation_ttl_hours: int = Field(default=24, gt=0)
+    classifier_context_messages: int = Field(default=5, ge=0)
 
     @field_validator("deepseek_api_key")
     @classmethod

@@ -22,6 +22,7 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
         "DEEPSEEK_MAX_ATTEMPTS",
         "SQLITE_PATH",
         "CONVERSATION_TTL_HOURS",
+        "CLASSIFIER_CONTEXT_MESSAGES",
     ):
         monkeypatch.delenv(name, raising=False)
 
