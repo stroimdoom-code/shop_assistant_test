@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         deepseek_model: Идентификатор модели из согласованной архитектуры.
         deepseek_timeout_seconds: Таймаут попытки, не более 30 секунд.
         deepseek_max_attempts: Число попыток на сообщение, включая первую, от 1 до 2.
-        sqlite_path: Путь к будущей SQLite относительно рабочего каталога.
+        sqlite_path: Путь к SQLite относительно рабочего каталога.
         conversation_ttl_hours: Срок хранения и неактивности диалога в часах.
     """
 

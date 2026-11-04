@@ -4,15 +4,21 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.concurrency import run_in_threadpool
 
 from app.config import load_settings
+from app.database import initialize_database
 from app.schemas import HealthResponse
 
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
-    """Проверить настройки до начала обслуживания HTTP-запросов."""
-    application.state.settings = load_settings()
+    """Проверить настройки, инициализировать SQLite и очистить истёкшие диалоги."""
+    settings = load_settings()
+    await run_in_threadpool(
+        initialize_database, settings.sqlite_path, settings.conversation_ttl_hours
+    )
+    application.state.settings = settings
     yield
 
 
@@ -20,7 +26,7 @@ def create_app() -> FastAPI:
     """Создать независимый экземпляр HTTP-приложения.
 
     Returns:
-        FastAPI-приложение с проверкой конфигурации при старте и маршрутом /health.
+        Приложение с проверкой конфигурации и SQLite при старте, маршрутом /health.
     """
     application = FastAPI(title="Shop Assistant", version="0.1.0", lifespan=_lifespan)
 
