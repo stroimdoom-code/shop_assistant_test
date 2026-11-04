@@ -1,0 +1,30 @@
+# Локальная конфигурация и секреты.
+.env
+.env.*
+!.env.example
+
+# Окружение, сборка и кеши инструментов.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Локальная база данных и журналы.
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
