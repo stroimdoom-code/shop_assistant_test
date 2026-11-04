@@ -531,20 +531,22 @@ class ConversationRepository:
     def touch(self, conversation_id: str, *, now: datetime | None = None) -> bool:
         """Обновить активность существующего непросроченного диалога.
 
+        Более ранняя отметка ожидавшего запроса не уменьшает уже записанную активность.
+
         Args:
             conversation_id: Канонический UUID диалога.
             now: Время принятия сообщения пользователя.
 
         Returns:
-            True при обновлении; False при истечении или движении времени назад.
+            True для активного диалога; False при истечении или времени до его создания.
 
         Raises:
             ValueError: UUID или время некорректны.
         """
         current = _now(now)
         result = self.connection.execute(
-            """UPDATE conversations SET last_activity_at = ?
-               WHERE id = ? AND last_activity_at > ? AND last_activity_at <= ?""",
+            """UPDATE conversations SET last_activity_at = max(last_activity_at, ?)
+               WHERE id = ? AND last_activity_at > ? AND created_at <= ?""",
             (
                 _timestamp(current),
                 _require_id(conversation_id),
@@ -634,13 +636,14 @@ class MessageRepository:
             Сохранённое сообщение с серверной ролью user.
 
         Raises:
-            SessionUnavailableError: Диалог отсутствует, просрочен или время идёт назад.
+            SessionUnavailableError: Диалог отсутствует, просрочен или время до его создания.
             ValueError: Хеш, текст или время некорректны.
             sqlite3.Error: Запись не удалась; транзакция откатывается.
         """
-        current = _now(now)
         _require_text(content)
         with transaction(self.connection):
+            # Часы читаем после получения блокировки, чтобы учесть истечение TTL в очереди.
+            current = _now(now)
             conversation = self.conversations.find_active(session_token_hash, now=current)
             if conversation is None:
                 raise SessionUnavailableError("Сессия отсутствует или срок её действия истёк")
@@ -667,9 +670,9 @@ class MessageRepository:
             ValueError: UUID, текст или время некорректны.
             sqlite3.Error: Запись не удалась.
         """
-        current = _now(now)
         _require_text(content)
         with transaction(self.connection):
+            current = _now(now)
             row = self.connection.execute(
                 "SELECT * FROM conversations WHERE id = ? AND last_activity_at > ?",
                 (_require_id(conversation_id), _cutoff(current, self.conversations.ttl)),
@@ -677,8 +680,8 @@ class MessageRepository:
             if row is None:
                 raise SessionUnavailableError("Диалог отсутствует или срок его действия истёк")
             conversation = _conversation(row)
-            if current < conversation.last_activity_at:
-                raise ValueError("Ответ не может предшествовать активности диалога")
+            if current < conversation.created_at:
+                raise ValueError("Ответ не может предшествовать созданию диалога")
             message = self._insert(conversation.id, "assistant", content, current)
         return message
 

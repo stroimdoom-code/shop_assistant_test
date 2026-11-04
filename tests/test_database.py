@@ -4,8 +4,10 @@ import os
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,11 +17,13 @@ from app.database import (
     ConversationRepository,
     DatabaseError,
     KnowledgeRepository,
+    Message,
     MessageRepository,
     SessionUnavailableError,
     hash_session_token,
     initialize_database,
     open_database,
+    transaction,
 )
 
 NOW = datetime(2026, 11, 4, 12, 0, 0, 123456, tzinfo=UTC)
@@ -746,3 +750,136 @@ def test_equivalent_sql_formatting_is_accepted(
     before = _snapshot(path)
     initialize_database(path, now=NOW)
     assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_out_of_order_writers_keep_active_session_and_latest_activity(
+    database_path: Path, role: str
+) -> None:
+    """Более ранняя отметка ожидавшего запроса не отклоняет активную сессию.
+
+    Args:
+        database_path: Изолированная SQLite v1.
+        role: Роль сообщения, записываемого после более нового запроса.
+    """
+    earlier = NOW + timedelta(seconds=1)
+    later = NOW + timedelta(seconds=2)
+    with open_database(database_path) as first, open_database(database_path) as second:
+        conversation, _ = ConversationRepository(first).create(now=NOW)
+        # Второй запрос зафиксирован раньше первого, хотя его отметка времени новее.
+        newer = MessageRepository(second).append_user_message(
+            conversation.session_token_hash, "Новый запрос", now=later
+        )
+        messages = MessageRepository(first)
+        if role == "user":
+            delayed = messages.append_user_message(
+                conversation.session_token_hash, "Ожидавший запрос", now=earlier
+            )
+        else:
+            delayed = messages.append_assistant_message(
+                conversation.id, "Ожидавший ответ", now=earlier
+            )
+        found = ConversationRepository(second).find_active(
+            conversation.session_token_hash, now=later
+        )
+        assert found is not None
+        assert found.last_activity_at == later
+        assert messages.get_history(conversation.session_token_hash, now=later) == (delayed, newer)
+        assert not first.in_transaction
+        assert not second.in_transaction
+        assert ConversationRepository(first).touch(conversation.id, now=earlier)
+        found = ConversationRepository(second).find_active(
+            conversation.session_token_hash, now=later
+        )
+        assert found is not None
+        assert found.last_activity_at == later
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_write_checks_current_time_after_acquiring_transaction(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """Сессия, истёкшая за время ожидания блокировки, не продолжается.
+
+    Args:
+        database_path: Изолированная SQLite v1.
+        monkeypatch: Средство управления часами до и после входа в транзакцию.
+        role: Роль записываемого сообщения.
+    """
+    with open_database(database_path) as connection:
+        conversation, _ = ConversationRepository(connection, ttl_hours=1).create(now=NOW)
+
+        def _clock(value: datetime | None) -> datetime:
+            if value is not None:
+                return value.astimezone(UTC)
+            # Моделируем переход границы TTL при ожидании BEGIN IMMEDIATE без sleep.
+            return NOW + (
+                timedelta(hours=2) if connection.in_transaction else timedelta(minutes=30)
+            )
+
+        monkeypatch.setattr(database, "_now", _clock)
+        messages = MessageRepository(connection, ttl_hours=1)
+        with pytest.raises(SessionUnavailableError):
+            if role == "user":
+                messages.append_user_message(conversation.session_token_hash, "Поздно")
+            else:
+                messages.append_assistant_message(conversation.id, "Поздно")
+        assert connection.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        assert not connection.in_transaction
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_waiting_sqlite_writer_accepts_message_after_newer_activity(
+    database_path: Path, role: str
+) -> None:
+    """Ожидающий блокировку поток сохраняет сообщение после более новой активности.
+
+    Args:
+        database_path: Изолированная SQLite v1.
+        role: Роль сообщения ожидавшего потока.
+    """
+    waiting = Event()
+    with ThreadPoolExecutor(max_workers=1) as executor, open_database(database_path) as connection:
+        conversation, _ = ConversationRepository(connection).create(now=NOW)
+
+        def _delayed_write() -> Message:
+            with open_database(database_path) as other:
+
+                def _trace(statement: str) -> None:
+                    if statement == "BEGIN IMMEDIATE":
+                        waiting.set()
+
+                other.set_trace_callback(_trace)
+                messages = MessageRepository(other)
+                earlier = NOW + timedelta(seconds=1)
+                if role == "user":
+                    return messages.append_user_message(
+                        conversation.session_token_hash, "Из ожидавшего потока", now=earlier
+                    )
+                return messages.append_assistant_message(
+                    conversation.id, "Из ожидавшего потока", now=earlier
+                )
+
+        with transaction(connection):
+            future = executor.submit(_delayed_write)
+            # Другой поток дошёл до BEGIN, но текущий владелец ещё удерживает блокировку.
+            assert waiting.wait(timeout=3)
+            connection.execute(
+                "INSERT INTO messages (conversation_id, role, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (conversation.id, "user", "Новая активность", "2026-11-04T12:00:02.123456Z"),
+            )
+            assert ConversationRepository(connection).touch(
+                conversation.id, now=NOW + timedelta(seconds=2)
+            )
+        saved = future.result(timeout=5)
+        assert saved.role == role
+        found = ConversationRepository(connection).find_active(
+            conversation.session_token_hash, now=NOW + timedelta(seconds=3)
+        )
+        assert found is not None
+        assert found.last_activity_at == NOW + timedelta(seconds=2)
+        history = MessageRepository(connection).get_history(
+            conversation.session_token_hash, now=NOW + timedelta(seconds=3)
+        )
+        assert [item.content for item in history] == ["Из ожидавшего потока", "Новая активность"]
