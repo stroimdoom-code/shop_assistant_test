@@ -1,4 +1,4 @@
-"""Асинхронная классификация через DeepSeek с ограниченными повторами и проверкой JSON."""
+"""Классификация DeepSeek: проверка JSON, ограниченные повторы и отдельная ошибка таймаута."""
 
 import asyncio
 import json
@@ -24,6 +24,10 @@ class ClassificationError(RuntimeError):
 
 class AuthenticationError(ClassificationError):
     """Провайдер отклонил авторизацию; повтор запроса не выполняется."""
+
+
+class ClassificationTimeoutError(ClassificationError):
+    """Последняя разрешённая попытка классификации завершилась таймаутом."""
 
 
 class _CompletionMessage(BaseModel):
@@ -105,6 +109,7 @@ class DeepSeekClassifier:
         Raises:
             ValueError: Текст или контекст некорректны; сетевой вызов не выполняется.
             AuthenticationError: Ошибка авторизации, без повторной попытки.
+            ClassificationTimeoutError: Попытки исчерпаны после таймаута.
             ClassificationError: Постоянная ошибка провайдера или исчерпание попыток.
         """
         try:
@@ -134,6 +139,7 @@ class DeepSeekClassifier:
             transport=self._transport, timeout=timeout, follow_redirects=False
         ) as client:
             for attempt in range(1, attempts + 1):
+                timed_out = False
                 try:
                     # Ограничиваем весь вызов, а не только ожидание очередного сетевого пакета.
                     async with asyncio.timeout(timeout):
@@ -145,7 +151,8 @@ class DeepSeekClassifier:
                     httpx.RemoteProtocolError,
                     httpx.ProxyError,
                     httpx.DecodingError,
-                ):
+                ) as error:
+                    timed_out = isinstance(error, (TimeoutError, httpx.TimeoutException))
                     _LOGGER.warning(
                         "Классификация: временная сетевая ошибка, попытка %s из %s",
                         attempt,
@@ -158,6 +165,7 @@ class DeepSeekClassifier:
                 if status in (401, 403):
                     raise AuthenticationError("DeepSeek отклонил авторизацию")
                 if status in (408, 425, 429) or 500 <= status <= 599:
+                    timed_out = status in (408, 504)
                     _LOGGER.warning(
                         "Классификация: временный HTTP-статус %s, попытка %s из %s",
                         status,
@@ -177,4 +185,8 @@ class DeepSeekClassifier:
                     _LOGGER.warning(
                         "Классификация: невалидный результат, попытка %s из %s", attempt, attempts
                     )
+        if timed_out:
+            raise ClassificationTimeoutError(
+                "Не удалось дождаться классификации: попытки исчерпаны"
+            )
         raise ClassificationError("Не удалось классифицировать запрос: попытки исчерпаны")

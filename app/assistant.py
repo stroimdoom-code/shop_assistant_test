@@ -1,8 +1,10 @@
-"""Обработка сообщения: серверная история, классификация и ответы только по регламенту."""
+"""Сервис диалога: последовательная обработка, история и ответы только по регламенту."""
 
+import asyncio
 import logging
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Protocol
 
 from pydantic import ValidationError
@@ -13,13 +15,14 @@ from app.database import (
     ConversationRepository,
     DatabaseError,
     KnowledgeRepository,
+    Message,
     MessageRepository,
     Product,
     Regulation,
     SessionUnavailableError,
     open_database,
 )
-from app.llm import ClassificationError, DeepSeekClassifier
+from app.llm import ClassificationError, ClassificationTimeoutError, DeepSeekClassifier
 from app.schemas import (
     ClassificationResult,
     ContextMessage,
@@ -35,6 +38,14 @@ from app.schemas import (
 
 TECHNICAL_ERROR_MESSAGE = "Сейчас не могу обработать запрос. Попробуйте ещё раз чуть позже"
 _LOGGER = logging.getLogger(__name__)
+
+
+class AssistantUnavailableError(RuntimeError):
+    """Обработка недоступна из-за провайдера, хранилища или состояния сессии."""
+
+
+class AssistantTimeoutError(AssistantUnavailableError):
+    """Обработка не завершилась за разрешённое время ожидания провайдера."""
 
 
 class RequestClassifier(Protocol):
@@ -249,14 +260,14 @@ class ShopAssistant:
             saved = messages.append_user_message(session_token_hash, message)
         return saved.conversation_id, context
 
-    def _finish(self, conversation_id: str, classification: ClassificationResult) -> str:
+    def _finish(self, conversation_id: str, classification: ClassificationResult) -> Message:
         with open_database(self._settings.sqlite_path) as connection:
             regulation = KnowledgeRepository(connection).read()
             reply = _compose_reply(classification, regulation)
-            MessageRepository(
+            saved = MessageRepository(
                 connection, self._settings.conversation_ttl_hours
             ).append_assistant_message(conversation_id, reply)
-        return reply
+        return saved
 
     async def respond(self, session_token_hash: str, message: str) -> str:
         """Обработать сообщение активной сессии и сохранить обычный ответ.
@@ -271,6 +282,26 @@ class ShopAssistant:
 
         Raises:
             ValueError: Текст или формат хеша некорректны; классификатор не вызывается.
+        """
+        try:
+            return (await self.process(session_token_hash, message)).content
+        except AssistantUnavailableError:
+            return TECHNICAL_ERROR_MESSAGE
+
+    async def process(self, session_token_hash: str, message: str) -> Message:
+        """Обработать запрос, возвращая сохранённый ответ или типизированную ошибку.
+
+        Args:
+            session_token_hash: SHA-256 токена активной сессии.
+            message: Непустой исходный текст пользователя.
+
+        Returns:
+            Сохранённый ответ с фактической временной отметкой UTC из SQLite.
+
+        Raises:
+            ValueError: Текст или формат хеша некорректны.
+            AssistantTimeoutError: Исчерпано ожидание классификации.
+            AssistantUnavailableError: Не удалось прочитать данные или сохранить ответ.
         """
         if not isinstance(message, str) or not message.strip():
             raise ValueError("Сообщение должно быть непустой строкой")
@@ -290,6 +321,9 @@ class ShopAssistant:
             )
             stage = "формирование и сохранение ответа"
             return await run_in_threadpool(self._finish, conversation_id, classification)
+        except (ClassificationTimeoutError, TimeoutError):
+            _LOGGER.warning("Обработка сообщения не завершена; этап: %s; ошибка: timeout", stage)
+            raise AssistantTimeoutError(TECHNICAL_ERROR_MESSAGE) from None
         except (
             ClassificationError,
             DatabaseError,
@@ -303,4 +337,51 @@ class ShopAssistant:
                 stage,
                 type(error).__name__,
             )
-            return TECHNICAL_ERROR_MESSAGE
+            raise AssistantUnavailableError(TECHNICAL_ERROR_MESSAGE) from None
+
+
+class AssistantService:
+    """Сериализация запросов одного диалога в пределах одного worker приложения."""
+
+    def __init__(self, settings: Settings, classifier: RequestClassifier | None = None) -> None:
+        """Создать сценарий и реестр блокировок активных обработок.
+
+        Args:
+            settings: Проверенные настройки приложения.
+            classifier: Необязательная подмена провайдера для изолированных тестов.
+        """
+        self._assistant = ShopAssistant(settings, classifier)
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
+
+    @asynccontextmanager
+    async def _session_lock(self, session_token_hash: str) -> AsyncIterator[None]:
+        lock, users = self._locks.get(session_token_hash, (asyncio.Lock(), 0))
+        self._locks[session_token_hash] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            # Учитываем ожидающие запросы, включая отменённые во время ожидания.
+            _, remaining = self._locks[session_token_hash]
+            if remaining == 1:
+                del self._locks[session_token_hash]
+            else:
+                self._locks[session_token_hash] = (lock, remaining - 1)
+
+    async def process(self, session_token_hash: str, message: str) -> Message:
+        """Выполнить весь сценарий последовательно для данного диалога.
+
+        Args:
+            session_token_hash: SHA-256 токена серверной сессии.
+            message: Исходный текст нового сообщения пользователя.
+
+        Returns:
+            Ответ, записанный в SQLite, с его временной отметкой.
+
+        Raises:
+            ValueError: Вход сценария некорректен.
+            AssistantTimeoutError: Провайдер не ответил вовремя.
+            AssistantUnavailableError: Зависимость или сессия недоступна.
+        """
+        async with self._session_lock(session_token_hash):
+            return await self._assistant.process(session_token_hash, message)

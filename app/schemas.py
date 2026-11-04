@@ -1,8 +1,8 @@
-"""Модели HTTP-проверки, контекста и строгого результата классификации запросов."""
+"""Строгие модели HTTP API, серверной истории и результата классификации запросов."""
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 NonBlankText = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 
@@ -25,6 +25,75 @@ class HealthResponse(BaseModel):
     """
 
     status: Literal["ok"] = "ok"
+
+
+class ChatRequest(BaseModel):
+    """Новое сообщение без клиентских ролей, истории и идентификаторов.
+
+    Attributes:
+        message: Исходный непустой текст длиной до 2000 символов без нормализации.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", hide_input_in_errors=True)
+    message: Annotated[str, StringConstraints(min_length=1, max_length=2000, pattern=r"\S")]
+
+
+class ChatResponse(BaseModel):
+    """Готовый ответ ассистента, уже сохранённый сервером.
+
+    Attributes:
+        answer: Полный текст ответа без идентификаторов сессии.
+        created_at: Фактическое время сохранения ответа в UTC.
+    """
+
+    answer: str
+    created_at: AwareDatetime
+
+
+class HistoryMessage(BaseModel):
+    """Публичные поля сохранённого сообщения без внутренних идентификаторов.
+
+    Attributes:
+        role: Роль, назначенная сервером.
+        content: Исходный текст сообщения.
+        created_at: Время сохранения в UTC.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: AwareDatetime
+
+
+class HistoryResponse(BaseModel):
+    """Полная история действующей сессии в хронологическом порядке.
+
+    Attributes:
+        messages: Сообщения либо пустой список при отсутствии действующей сессии.
+    """
+
+    messages: list[HistoryMessage]
+
+
+class ErrorDetail(BaseModel):
+    """Безопасное описание ошибки HTTP API.
+
+    Attributes:
+        code: Стабильный машинный код.
+        message: Понятное сообщение без деталей реализации и входных данных.
+    """
+
+    code: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    """Единая оболочка ошибок валидации, сервиса и HTTP.
+
+    Attributes:
+        error: Машинный код и безопасный текст ошибки.
+    """
+
+    error: ErrorDetail
 
 
 class ContextMessage(_ClassifierModel):

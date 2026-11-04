@@ -15,7 +15,14 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from app import assistant as assistant_module
-from app.assistant import TECHNICAL_ERROR_MESSAGE, ShopAssistant, _days
+from app.assistant import (
+    TECHNICAL_ERROR_MESSAGE,
+    AssistantService,
+    AssistantTimeoutError,
+    AssistantUnavailableError,
+    ShopAssistant,
+    _days,
+)
 from app.config import Settings, load_settings
 from app.database import (
     Conversation,
@@ -26,7 +33,12 @@ from app.database import (
     open_database,
     transaction,
 )
-from app.llm import AuthenticationError, ClassificationError, DeepSeekClassifier
+from app.llm import (
+    AuthenticationError,
+    ClassificationError,
+    ClassificationTimeoutError,
+    DeepSeekClassifier,
+)
 from app.schemas import ClassificationResult, ContextMessage
 
 CASES: list[tuple[str, list[dict[str, object]]]] = [
@@ -1667,3 +1679,164 @@ async def test_defect_topic_respects_three_state_condition(
         history = MessageRepository(connection).get_history(assistant_session.session_token_hash)
     assert [item.role for item in history] == ["user", "assistant"]
     assert history[-1].content == reply
+
+
+class _ControlledClassifier:
+    def __init__(self, *, fail_first: bool = False) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.other_started = asyncio.Event()
+        self.calls: list[tuple[str, tuple[ContextMessage, ...]]] = []
+        self.fail_first = fail_first
+
+    async def classify(
+        self, message: str, *, context: Sequence[ContextMessage] = ()
+    ) -> ClassificationResult:
+        self.calls.append((message, tuple(context)))
+        if message == "Первое":
+            self.started.set()
+            await self.release.wait()
+            if self.fail_first:
+                raise ClassificationError("Недоступно")
+        if message == "Другой диалог":
+            self.other_started.set()
+        return _result([{"type": "delivery", "product_name": None}])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_service_serializes_dialogue_and_releases_lock_after_failure(
+    assistant_settings: Settings, assistant_session: Conversation, fail_first: bool
+) -> None:
+    """Второй запрос видит результат первого, включая сохранённый вопрос при сбое.
+
+    Args:
+        assistant_settings: Настройки временной SQLite.
+        assistant_session: Активная сессия.
+        fail_first: Должна ли первая классификация завершиться ошибкой.
+    """
+    classifier = _ControlledClassifier(fail_first=fail_first)
+    service = AssistantService(assistant_settings, classifier)
+    first = asyncio.create_task(service.process(assistant_session.session_token_hash, "Первое"))
+    await asyncio.wait_for(classifier.started.wait(), timeout=2)
+    second = asyncio.create_task(service.process(assistant_session.session_token_hash, "Второе"))
+    await asyncio.sleep(0)
+    assert len(classifier.calls) == 1
+    classifier.release.set()
+    if fail_first:
+        with pytest.raises(AssistantUnavailableError):
+            await first
+    else:
+        assert (await first).role == "assistant"
+    assert (await asyncio.wait_for(second, timeout=2)).role == "assistant"
+    context = classifier.calls[1][1]
+    assert context[0].content == "Первое"
+    assert [item.role for item in context] == (["user"] if fail_first else ["user", "assistant"])
+    with open_database(assistant_settings.sqlite_path) as connection:
+        history = MessageRepository(connection).get_history(assistant_session.session_token_hash)
+    assert [item.role for item in history] == (
+        ["user", "user", "assistant"] if fail_first else ["user", "assistant"] * 2
+    )
+    assert service._locks == {}
+
+
+@pytest.mark.anyio
+async def test_service_allows_different_dialogues_concurrently(
+    assistant_settings: Settings, assistant_session: Conversation
+) -> None:
+    """Ожидание классификации одного диалога не блокирует другой диалог.
+
+    Args:
+        assistant_settings: Настройки временной БД.
+        assistant_session: Первая активная сессия.
+    """
+    with open_database(assistant_settings.sqlite_path) as connection:
+        other, _ = ConversationRepository(connection).create()
+    classifier = _ControlledClassifier()
+    service = AssistantService(assistant_settings, classifier)
+    first = asyncio.create_task(service.process(assistant_session.session_token_hash, "Первое"))
+    try:
+        await asyncio.wait_for(classifier.started.wait(), timeout=2)
+        second = await asyncio.wait_for(
+            service.process(other.session_token_hash, "Другой диалог"), 2
+        )
+        assert second.role == "assistant" and classifier.other_started.is_set()
+        assert not first.done()
+    finally:
+        classifier.release.set()
+        await first
+    assert service._locks == {}
+
+
+@pytest.mark.anyio
+async def test_service_cancellation_releases_waiter_and_owner_locks(
+    assistant_settings: Settings, assistant_session: Conversation
+) -> None:
+    """Отмена ожидающего и выполняющегося запроса не оставляет блокировку диалога.
+
+    Args:
+        assistant_settings: Настройки временной БД.
+        assistant_session: Активный диалог.
+    """
+    classifier = _ControlledClassifier()
+    service = AssistantService(assistant_settings, classifier)
+    first = asyncio.create_task(service.process(assistant_session.session_token_hash, "Первое"))
+    await asyncio.wait_for(classifier.started.wait(), timeout=2)
+    waiter = asyncio.create_task(service.process(assistant_session.session_token_hash, "Ожидающий"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert service._locks == {}
+    result = await asyncio.wait_for(
+        service.process(assistant_session.session_token_hash, "Повтор"), 2
+    )
+    assert result.role == "assistant"
+    assert [item[0] for item in classifier.calls] == ["Первое", "Повтор"]
+    assert service._locks == {}
+
+
+@pytest.mark.anyio
+async def test_service_exposes_provider_timeout_without_saving_technical_answer(
+    assistant_settings: Settings, assistant_session: Conversation
+) -> None:
+    """Тип таймаута доходит до HTTP-границы, пользовательский вопрос сохраняется.
+
+    Args:
+        assistant_settings: Настройки временной SQLite.
+        assistant_session: Активная сессия.
+    """
+    classifier = _StubClassifier(
+        _result([{"type": "delivery", "product_name": None}]),
+    )
+    classifier.error = ClassificationTimeoutError("Скрытый текст")
+    service = AssistantService(assistant_settings, classifier)
+    with pytest.raises(AssistantTimeoutError):
+        await service.process(assistant_session.session_token_hash, "Вопрос")
+    with open_database(assistant_settings.sqlite_path) as connection:
+        history = MessageRepository(connection).get_history(assistant_session.session_token_hash)
+    assert [item.role for item in history] == ["user"]
+    assert service._locks == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [408, 504])
+async def test_provider_http_timeout_is_distinguished_from_unavailability(
+    classifier_settings: Settings, status: int
+) -> None:
+    """Исчерпанные ответы HTTP 408/504 преобразуются в типизированный таймаут.
+
+    Args:
+        classifier_settings: Фиктивные настройки провайдера.
+        status: Таймаут HTTP от провайдера.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="Скрытое содержимое", request=request)
+
+    classifier = DeepSeekClassifier(classifier_settings, transport=httpx.MockTransport(handler))
+    with pytest.raises(ClassificationTimeoutError):
+        await classifier.classify("Вопрос")
