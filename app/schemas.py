@@ -133,7 +133,7 @@ class ReturnTopic(_ClassifierModel):
 
 
 class DefectTopic(_ClassifierModel):
-    """Обращение по браку без применения правил обычного возврата.
+    """Обращение о возможном браке с отдельным признаком состояния товара.
 
     Attributes:
         type: Метка темы defect.

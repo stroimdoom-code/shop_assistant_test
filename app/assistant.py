@@ -176,7 +176,13 @@ def _topic_reply(topic: Topic, regulation: Regulation) -> tuple[list[str], str |
     if isinstance(topic, ReturnTopic):
         return _return_reply(topic, regulation)
     if isinstance(topic, DefectTopic):
-        return [_defect_reply(regulation)], None
+        if topic.defective is None:
+            return [], "Есть ли у товара неисправность?"
+        if topic.defective:
+            return [_defect_reply(regulation)], None
+        return _return_reply(
+            ReturnTopic.model_validate({**topic.model_dump(), "type": "return"}), regulation
+        )
     if isinstance(topic, DiscountTopic):
         # Процент из классификации не участвует ни в расчётах, ни в выборе исключений.
         if regulation.discounts_allowed:

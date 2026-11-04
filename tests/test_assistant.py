@@ -1,4 +1,4 @@
-"""Изолированные проверки контракта и адаптера классификации DeepSeek без сети и ключей."""
+"""Изолированные проверки классификации и ответов по регламенту без сети и ключей."""
 
 import asyncio
 import json
@@ -1609,3 +1609,61 @@ async def test_repeated_delivery_conditions_are_not_duplicated(
     )
     assert "не могу проверить статус заказа №1842" in reply
     assert reply.count("Общие условия доставки") == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("defective", [True, False, None])
+@pytest.mark.parametrize("return_day", [None, 16])
+async def test_defect_topic_respects_three_state_condition(
+    assistant_settings: Settings,
+    assistant_session: Conversation,
+    defective: bool | None,
+    return_day: int | None,
+) -> None:
+    """Метка defect не подменяет явно извлечённое состояние товара.
+
+    Args:
+        assistant_settings: Настройки временной БД.
+        assistant_session: Активная сессия.
+        defective: Подтверждённый, исключённый или неизвестный брак.
+        return_day: Неизвестный день или обращение после обычного срока возврата.
+    """
+    classification = _result(
+        [
+            {
+                "type": "defect",
+                "product_name": "X1",
+                "return_day": return_day,
+                "opened": True,
+                "defective": defective,
+            },
+            {"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]},
+        ]
+    )
+    reply = await ShopAssistant(assistant_settings, _StubClassifier(classification)).respond(
+        assistant_session.session_token_hash, "Вопрос о состоянии и цене X1"
+    )
+    assert "2 490 ₽" in reply
+    assert reply.count("?") <= 1
+    if defective is True:
+        assert "принимается на экспертизу" in reply
+        assert "не гарантирован" in reply
+        assert "14 дней" not in reply and "3 рабочих дня" not in reply
+        assert "?" not in reply
+    elif defective is False:
+        assert "Срок возврата товара без брака — 14 дней" in reply
+        assert "экспертиз" not in reply and "?" not in reply
+        if return_day == 16:
+            assert "Он уже истёк" in reply
+            assert "3 рабочих дня" not in reply
+        else:
+            assert "Вскрытый товар без брака" in reply
+            assert "на ту же карту" in reply and "3 рабочих дня" in reply
+    else:
+        assert "Есть ли у товара неисправность?" in reply
+        assert "экспертиз" not in reply
+        assert "14 дней" not in reply and "3 рабочих дня" not in reply
+    with open_database(assistant_settings.sqlite_path) as connection:
+        history = MessageRepository(connection).get_history(assistant_session.session_token_hash)
+    assert [item.role for item in history] == ["user", "assistant"]
+    assert history[-1].content == reply
