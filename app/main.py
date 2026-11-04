@@ -237,8 +237,6 @@ def create_app() -> FastAPI:
         """
         settings = cast(Settings, request.app.state.settings)
         token = request.cookies.get(_COOKIE_NAME)
-        if token is not None:
-            request.state.chat_cookie = None
         token_hash, new_token = await run_in_threadpool(
             _resolve_session, settings, token, create=True
         )

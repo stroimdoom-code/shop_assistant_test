@@ -447,6 +447,45 @@ def test_sqlite_session_error_is_safe(
     assert not stub.calls
 
 
+@pytest.mark.parametrize("route", ["/api/chat/history", "/api/chat/messages"])
+def test_session_resolution_failure_preserves_valid_cookie_and_history(
+    chat_client: tuple[TestClient, _AssistantStub], monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Временный сбой SQLite не удаляет действующую cookie и доступ к истории.
+
+    Args:
+        chat_client: HTTP-клиент с подменённым сервисом и временной SQLite.
+        monkeypatch: Средство временной подмены разрешения сессии.
+        route: Маршрут чтения истории либо отправки сообщения.
+    """
+    client, stub = chat_client
+    assert client.post("/api/chat/messages", json={"message": "Первый вопрос"}).status_code == 200
+    token = client.cookies.get("shop_assistant_session")
+    assert token is not None
+    before = client.get("/api/chat/history").json()
+
+    def fail_session(settings: Settings, token: str | None, *, create: bool) -> tuple[None, None]:
+        raise sqlite3.OperationalError("Временный сбой SQLite")
+
+    with monkeypatch.context() as scoped_patch:
+        scoped_patch.setattr(main_module, "_resolve_session", fail_session)
+        response = (
+            client.get(route)
+            if route.endswith("history")
+            else client.post(route, json={"message": "Не сохранять при сбое"})
+        )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "service_unavailable"
+    assert "set-cookie" not in response.headers
+    assert client.cookies.get("shop_assistant_session") == token
+    assert len(stub.calls) == 1
+    assert client.get("/api/chat/history").json() == before
+    assert client.post("/api/chat/messages", json={"message": "Повтор"}).status_code == 200
+    assert client.cookies.get("shop_assistant_session") == token
+    assert stub.calls[0][0] == stub.calls[1][0] == hash_session_token(token)
+    assert len(client.get("/api/chat/history").json()["messages"]) == 4
+
+
 def test_history_isolated_by_cookie_and_openapi_contract(
     chat_client: tuple[TestClient, _AssistantStub],
 ) -> None:

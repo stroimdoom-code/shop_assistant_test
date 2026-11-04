@@ -1,4 +1,32 @@
-# HTTP API для взаимодействия с ассистентом
+# Исправление сохранения cookie при временном сбое SQLite
+
+Проверено 05.11.2026. Удалена преждевременная пометка cookie на удаление
+в POST до вызова `_resolve_session`. Теперь cookie меняется только после
+успешного разрешения или создания сессии. Ошибка SQLite на этом этапе
+возвращает 503 без `Set-Cookie`, сохраняя действующий токен покупателя.
+
+Регрессионный тест сначала воспроизвёл удаление cookie в POST. После исправления
+оба варианта теста (GET и POST) проходят: cookie остаётся прежней, сервис не
+вызывается при сбое разрешения сессии, история после восстановления SQLite
+доступна, повторный POST продолжает тот же диалог. Описание поведения добавлено
+в `app/README.md`. Реальный DeepSeek не вызывался.
+
+Фактические проверки через `.venv/Scripts/python.exe`, все с кодом 0:
+
+```text
+python -m pytest --cov --cov-report=term-missing --cov-report=xml
+326 passed in 8.46s; Total coverage: 96.82%
+python -m ruff check .
+All checks passed!
+python -m ruff format --check .
+20 files already formatted
+python -m mypy
+Success: no issues found in 14 source files
+python -m bandit -c pyproject.toml -r app scripts
+No issues identified; 1687 lines; Low: 0; Medium: 0; High: 0
+```
+
+# Предыдущий этап: HTTP API для взаимодействия с ассистентом
 
 Проверено 05.11.2026 по [карточке HTTP API](https://trello.com/c/SkNegOY7).
 Добавлены `POST /api/chat/messages` и `GET /api/chat/history` в существующий
