@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Sequence
+from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
@@ -60,14 +61,18 @@ class DeepSeekClassifier:
         Args:
             settings: Проверенные настройки из окружения.
             transport: Подмена HTTP-транспорта для изолированных тестов.
-            prompt_path: Путь к инструкции; по умолчанию prompts/classifier.md в проекте.
+            prompt_path: Явная подмена инструкции; по умолчанию ресурс app/prompts/classifier.md.
 
         Raises:
             ClassificationError: Инструкция недоступна, пуста или ключ имеет неверный формат.
         """
-        path = prompt_path or Path(__file__).resolve().parents[1] / "prompts" / "classifier.md"
         try:
-            prompt = path.read_text(encoding="utf-8")
+            resource = (
+                prompt_path
+                if prompt_path is not None
+                else files("app").joinpath("prompts", "classifier.md")
+            )
+            prompt = resource.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             raise ClassificationError("Не удалось загрузить инструкцию классификатора") from None
         if not prompt.strip():

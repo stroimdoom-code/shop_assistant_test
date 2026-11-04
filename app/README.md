@@ -40,8 +40,10 @@
 ## Классификация через DeepSeek
 
 `DeepSeekClassifier(settings, *, transport=None, prompt_path=None)` загружает
-`prompts/classifier.md` относительно исходников проекта и добавляет JSON Schema
-из Pydantic. `prompt_path` позволяет явно задать расположение инструкции.
+единственный исходный `app/prompts/classifier.md` через `importlib.resources`
+и добавляет JSON Schema из Pydantic. Ресурс включён в wheel и не зависит от
+рабочего каталога или расположения репозитория. `prompt_path` сохраняет приоритет
+для явно заданного файла, в том числе в тестах.
 Пустая/недоступная инструкция вызывает `ClassificationError` до сетевого запроса.
 
 `await classifier.classify(message, *, context=())` возвращает
@@ -51,13 +53,36 @@
 
 | `type` / модель | Обязательные детали |
 | --- | --- |
-| `product` / `ProductTopic` | `product_name`: строка или null |
+| `product` / `ProductTopic` | `product_name`: строка или null; обязательный непустой `requested_info` со всеми запрошенными сведениями |
 | `delivery` / `DeliveryTopic` | `product_name`: строка или null |
 | `order_status` / `OrderStatusTopic` | `order_number`: строка или null, с сохранением ведущих нулей |
 | `return` / `ReturnTopic` | `product_name`, `return_day`: целое ≥0 или null, `opened`, `defective` |
 | `defect` / `DefectTopic` | Те же детали для конкретного обращения по браку |
 | `discount` / `DiscountTopic` | `product_name`, `requested_percent`: конечное число ≥0 или null |
 | `out_of_scope` / `OutOfScopeTopic` | `question`: непустая формулировка неизвестной части вопроса |
+
+В `requested_info` используются `PriceRequest(kind="price")`,
+`AvailabilityRequest(kind="availability")` и
+`FeatureRequest(kind="feature", name="название из вопроса")`.
+Поле `name` обязательно только для характеристики и сохраняет её название,
+например «шумоподавление». Значения цены, наличия или характеристики в эти
+объекты не записываются. Наличие характеристики в SQLite проверит будущий
+`app/assistant.py`; неизвестная характеристика остаётся вопросом о товаре.
+Для составного вопроса сохраняются все пункты:
+
+```json
+{
+  "type": "product",
+  "product_name": "X1",
+  "requested_info": [
+    {"kind": "price"},
+    {"kind": "feature", "name": "шумоподавление"}
+  ]
+}
+```
+
+Тема `product` без `requested_info` больше не проходит валидацию. Инструкция
+содержит отдельные примеры цены, наличия, характеристики и их сочетания.
 
 `opened` и `defective` различают true, false и null («не сказано»).
 Nullable-поля обязательны: неизвестное значение явно передаётся как null.

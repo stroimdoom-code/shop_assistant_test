@@ -3,6 +3,7 @@
 import asyncio
 import json
 import traceback
+from importlib.resources import files
 from pathlib import Path
 
 import httpx2 as httpx
@@ -17,7 +18,7 @@ CASES: list[tuple[str, list[dict[str, object]]]] = [
     (
         "Сколько стоят X1 и когда доставите?",
         [
-            {"type": "product", "product_name": "X1"},
+            {"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]},
             {"type": "delivery", "product_name": "X1"},
         ],
     ),
@@ -50,7 +51,7 @@ CASES: list[tuple[str, list[dict[str, object]]]] = [
     (
         "Сколько стоят X1 и можно ли в рассрочку?",
         [
-            {"type": "product", "product_name": "X1"},
+            {"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]},
             {"type": "out_of_scope", "question": "Можно ли в рассрочку?"},
         ],
     ),
@@ -72,6 +73,19 @@ CASES: list[tuple[str, list[dict[str, object]]]] = [
             },
         ],
     ),
+]
+
+PRODUCT_INFORMATION_CASES: list[tuple[str, list[dict[str, object]]]] = [
+    ("Сколько стоят X1?", [{"kind": "price"}]),
+    ("Есть ли в X1 шумоподавление?", [{"kind": "feature", "name": "шумоподавление"}]),
+    (
+        "Сколько стоят X1 и есть ли в них шумоподавление?",
+        [
+            {"kind": "price"},
+            {"kind": "feature", "name": "шумоподавление"},
+        ],
+    ),
+    ("X1 есть в наличии?", [{"kind": "availability"}]),
 ]
 
 
@@ -120,6 +134,34 @@ def _completion(content: str, *, finish_reason: str = "stop") -> httpx.Response:
             ],
         },
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("message", "requested_info"), PRODUCT_INFORMATION_CASES)
+async def test_requested_product_information_is_preserved(
+    classifier_settings: Settings, message: str, requested_info: list[dict[str, object]]
+) -> None:
+    """Вопросы о цене, наличии и характеристике сохраняют различимый смысл.
+
+    Args:
+        classifier_settings: Изолированные настройки с фиктивным ключом.
+        message: Покупательский вопрос о товаре.
+        requested_info: Все запрошенные сведения, включая название характеристики.
+    """
+    topic: dict[str, object] = {
+        "type": "product",
+        "product_name": "X1",
+        "requested_info": requested_info,
+    }
+    expected = _result([topic])
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["messages"][-1]["content"] == message
+        return _completion(expected.model_dump_json())
+
+    classifier = DeepSeekClassifier(classifier_settings, transport=httpx.MockTransport(_handler))
+    result = await classifier.classify(message)
+    assert result.model_dump()["topics"] == [topic]
 
 
 @pytest.mark.anyio
@@ -241,7 +283,9 @@ def test_details_are_attached_to_each_topic() -> None:
         {"topics": [], "needs_clarification": True, "clarification_reason": None},
         {"topics": [], "needs_clarification": True, "clarification_reason": "   "},
         {
-            "topics": [{"type": "product", "product_name": "X1"}],
+            "topics": [
+                {"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]}
+            ],
             "needs_clarification": False,
             "clarification_reason": "Противоречие",
         },
@@ -251,7 +295,14 @@ def test_details_are_attached_to_each_topic() -> None:
             "clarification_reason": None,
         },
         {
-            "topics": [{"type": "product", "product_name": "X1", "order_number": "1842"}],
+            "topics": [
+                {
+                    "type": "product",
+                    "product_name": "X1",
+                    "requested_info": [{"kind": "price"}],
+                    "order_number": "1842",
+                }
+            ],
             "needs_clarification": False,
             "clarification_reason": None,
         },
@@ -332,12 +383,16 @@ def test_details_are_attached_to_each_topic() -> None:
             "clarification_reason": None,
         },
         {
-            "topics": [{"type": "product", "product_name": "X1"}],
+            "topics": [
+                {"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]}
+            ],
             "needs_clarification": "false",
             "clarification_reason": None,
         },
         {
-            "topics": [{"type": "product", "product_name": "X1"}],
+            "topics": [
+                {"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]}
+            ],
             "needs_clarification": False,
             "clarification_reason": None,
             "answer": "Выдуманный ответ",
@@ -356,13 +411,73 @@ def test_invalid_or_coerced_classification_is_rejected(payload: dict[str, object
 
 def test_prompt_examples_match_runtime_schema() -> None:
     """Все примеры рабочего промпта соответствуют фактической Pydantic-схеме."""
-    path = Path(__file__).resolve().parents[1] / "prompts" / "classifier.md"
+    resource = files("app").joinpath("prompts", "classifier.md")
     examples = [
-        line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(chr(123))
+        line
+        for line in resource.read_text(encoding="utf-8").splitlines()
+        if line.startswith(chr(123))
     ]
-    assert len(examples) == 10
+    assert len(examples) == 14
     for example in examples:
         ClassificationResult.model_validate_json(example)
+
+
+@pytest.mark.parametrize(
+    "requested_info",
+    [
+        None,
+        [],
+        ["price"],
+        [{"kind": "stock"}],
+        [{"kind": "feature"}],
+        [{"kind": "feature", "name": " "}],
+        [{"kind": "price", "name": "шумоподавление"}],
+        [{"kind": "feature", "name": "шумоподавление", "available": True}],
+    ],
+)
+def test_invalid_requested_product_information_is_rejected(requested_info: object) -> None:
+    """Запрошенные сведения обязательны и не содержат выдуманного ответа о товаре.
+
+    Args:
+        requested_info: Неверный список сведений, неизвестный тип или лишний бизнес-факт.
+    """
+    with pytest.raises(ValidationError):
+        _result([{"type": "product", "product_name": "X1", "requested_info": requested_info}])
+
+
+def test_product_question_cannot_omit_requested_information() -> None:
+    """Тема товара без предмета вопроса больше не считается валидной классификацией."""
+    with pytest.raises(ValidationError):
+        _result([{"type": "product", "product_name": "X1"}])
+
+
+@pytest.mark.anyio
+async def test_explicit_prompt_path_overrides_package_resource(
+    classifier_settings: Settings, tmp_path: Path
+) -> None:
+    """Явный prompt_path сохраняет приоритет над ресурсом установленного пакета.
+
+    Args:
+        classifier_settings: Изолированные настройки с фиктивным ключом.
+        tmp_path: Каталог за пределами пакета с тестовой инструкцией.
+    """
+    path = tmp_path / "custom.md"
+    path.write_text("Тестовая инструкция из явно заданного файла.", encoding="utf-8")
+    expected = _result(
+        [{"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]}]
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        instruction = json.loads(request.content)["messages"][0]["content"]
+        assert instruction.startswith("Тестовая инструкция из явно заданного файла.")
+        assert "JSON Schema результата:" in instruction
+        assert "# Классификатор запросов покупателей" not in instruction
+        return _completion(expected.model_dump_json())
+
+    classifier = DeepSeekClassifier(
+        classifier_settings, prompt_path=path, transport=httpx.MockTransport(_handler)
+    )
+    assert await classifier.classify("Сколько стоят X1?") == expected
 
 
 @pytest.mark.anyio
@@ -377,7 +492,9 @@ async def test_temporary_http_failure_is_retried_once(
         status: Временный статус провайдера.
     """
     calls = 0
-    expected = _result([{"type": "product", "product_name": "X1"}])
+    expected = _result(
+        [{"type": "product", "product_name": "X1", "requested_info": [{"kind": "price"}]}]
+    )
 
     def _handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -410,7 +527,9 @@ async def test_temporary_network_failure_is_retried_once(
         error_type: Тип восстановимой ошибки транспорта.
     """
     calls = 0
-    expected = _result([{"type": "product", "product_name": None}])
+    expected = _result(
+        [{"type": "product", "product_name": None, "requested_info": [{"kind": "availability"}]}]
+    )
 
     def _handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -420,7 +539,7 @@ async def test_temporary_network_failure_is_retried_once(
         return _completion(expected.model_dump_json())
 
     classifier = DeepSeekClassifier(classifier_settings, transport=httpx.MockTransport(_handler))
-    assert await classifier.classify("Что за товар?") == expected
+    assert await classifier.classify("Есть ли товар в наличии?") == expected
     assert calls == 2
 
 

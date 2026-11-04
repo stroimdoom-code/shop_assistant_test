@@ -39,16 +39,55 @@ class ContextMessage(_ClassifierModel):
     content: NonBlankText
 
 
+class PriceRequest(_ClassifierModel):
+    """Запрос цены без подстановки её значения из знаний модели.
+
+    Attributes:
+        kind: Метка запрошенных сведений price.
+    """
+
+    kind: Literal["price"]
+
+
+class AvailabilityRequest(_ClassifierModel):
+    """Запрос наличия товара без утверждения о фактическом остатке.
+
+    Attributes:
+        kind: Метка запрошенных сведений availability.
+    """
+
+    kind: Literal["availability"]
+
+
+class FeatureRequest(_ClassifierModel):
+    """Запрос конкретной характеристики без утверждения о её наличии.
+
+    Attributes:
+        kind: Метка запрошенных сведений feature.
+        name: Название характеристики из сообщения или явно связанного контекста.
+    """
+
+    kind: Literal["feature"]
+    name: NonBlankText
+
+
+ProductInformationRequest = Annotated[
+    PriceRequest | AvailabilityRequest | FeatureRequest, Field(discriminator="kind")
+]
+
+
 class ProductTopic(_ClassifierModel):
     """Вопрос о товаре, его стоимости, наличии или характеристиках.
 
     Attributes:
         type: Метка темы product.
         product_name: Указанное название либо null, если товар не назван.
+        requested_info: Непустой список всех запрошенных сведений о данном товаре.
     """
 
     type: Literal["product"]
     product_name: NonBlankText | None
+    requested_info: list[ProductInformationRequest] = Field(min_length=1)
 
 
 class DeliveryTopic(_ClassifierModel):

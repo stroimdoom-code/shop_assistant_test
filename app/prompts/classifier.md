@@ -30,7 +30,15 @@
 
 ## Темы
 
-- product: стоимость, наличие и характеристики товара.
+- product: стоимость, наличие и характеристики товара. Обязательно сохраняй
+  requested_info — непустой список всех запрошенных сведений:
+  {"kind":"price"} для цены, {"kind":"availability"} для наличия,
+  {"kind":"feature","name":"название из запроса"} для конкретной характеристики.
+  Вопрос о цене и характеристике должен содержать оба пункта. Для разных
+  характеристик сохраняй отдельные пункты с их названиями, не заменяй их
+  общим словом «характеристики». Не добавляй значение цены, наличие товара
+  или характеристики: это проверит Python по SQLite. Если непонятно, какие
+  сведения о товаре запрашиваются, требуется уточнение; не выдумывай пункт списка.
 - delivery: общие сроки, способ и условия доставки без конкретного заказа.
 - order_status: местонахождение, доставка или статус конкретного заказа.
   Фраза «мой заказ» достаточна для этой темы, но номер может быть null.
@@ -62,7 +70,19 @@ needs_clarification=true означает, что неясен смысл, сс�
 ## Примеры JSON
 
 Сообщение: «Сколько стоят X1 и когда доставите?»
-{"topics":[{"type":"product","product_name":"X1"},{"type":"delivery","product_name":"X1"}],"needs_clarification":false,"clarification_reason":null}
+{"topics":[{"type":"product","product_name":"X1","requested_info":[{"kind":"price"}]},{"type":"delivery","product_name":"X1"}],"needs_clarification":false,"clarification_reason":null}
+
+Сообщение: «Сколько стоят X1?»
+{"topics":[{"type":"product","product_name":"X1","requested_info":[{"kind":"price"}]}],"needs_clarification":false,"clarification_reason":null}
+
+Сообщение: «Есть ли в X1 шумоподавление?»
+{"topics":[{"type":"product","product_name":"X1","requested_info":[{"kind":"feature","name":"шумоподавление"}]}],"needs_clarification":false,"clarification_reason":null}
+
+Сообщение: «Сколько стоят X1 и есть ли в них шумоподавление?»
+{"topics":[{"type":"product","product_name":"X1","requested_info":[{"kind":"price"},{"kind":"feature","name":"шумоподавление"}]}],"needs_clarification":false,"clarification_reason":null}
+
+Сообщение: «X1 есть в наличии?»
+{"topics":[{"type":"product","product_name":"X1","requested_info":[{"kind":"availability"}]}],"needs_clarification":false,"clarification_reason":null}
 
 Сообщение: «Где заказ 1842?»
 {"topics":[{"type":"order_status","order_number":"1842"}],"needs_clarification":false,"clarification_reason":null}
@@ -80,7 +100,7 @@ needs_clarification=true означает, что неясен смысл, сс�
 {"topics":[{"type":"defect","product_name":"наушники","return_day":null,"opened":null,"defective":true}],"needs_clarification":false,"clarification_reason":null}
 
 Сообщение: «Сколько стоят X1 и можно ли в рассрочку?»
-{"topics":[{"type":"product","product_name":"X1"},{"type":"out_of_scope","question":"Можно ли в рассрочку?"}],"needs_clarification":false,"clarification_reason":null}
+{"topics":[{"type":"product","product_name":"X1","requested_info":[{"kind":"price"}]},{"type":"out_of_scope","question":"Можно ли в рассрочку?"}],"needs_clarification":false,"clarification_reason":null}
 
 Контекст: покупатель спросил «Можно вернуть X1?».
 Текущее сообщение: «А если я их вскрыл?»

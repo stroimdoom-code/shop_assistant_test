@@ -26,8 +26,15 @@ dev = [
     "ruff>=0.15.8,<1",
 ]
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["app*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+app = ["prompts/classifier.md"]
 
 [tool.ruff]
 target-version = "py312"

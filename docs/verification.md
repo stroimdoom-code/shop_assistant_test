@@ -1,4 +1,122 @@
-# Классификация запросов покупателей через DeepSeek
+# Исправления: предмет вопроса о товаре и промпт в wheel
+
+Проверено 05.11.2026. Оба замечания исправлены в существующих модулях и тестах.
+Обращения к реальному DeepSeek для этой проверки не выполнялись.
+
+## Изменения формата
+
+`ProductTopic.requested_info` — обязательный непустой список запрошенных сведений:
+`{"kind":"price"}`, `{"kind":"availability"}` или
+`{"kind":"feature","name":"название из запроса"}`.
+Цена и шумоподавление вместе сохраняются двумя пунктами. Поля фактической цены
+или наличия характеристики в контракт не добавлены: наличие сведений в регламенте
+проверит будущий `app/assistant.py`.
+
+Добавлены публичные модели `PriceRequest`, `AvailabilityRequest`, `FeatureRequest`
+с русскими Google Style docstring и аннотациями. Обновлены инструкция и все её
+примеры, текущая документация формата и дерево проекта. Старый формат `product`
+без предмета вопроса больше не проходит валидацию.
+
+В `tests/test_assistant.py` добавлены отдельные сценарии цены, шумоподавления,
+их сочетания и наличия; четыре случая сначала воспроизвели отсутствие поля
+в старой схеме. Дополнительно проверены недопустимый/пустой список, неизвестный
+тип, отсутствующее название характеристики, лишний бизнес-факт и подмена промпта.
+
+## Единственный исходный промпт
+
+Файл перенесён из `prompts/classifier.md` в `app/prompts/classifier.md`.
+Старой копии нет. `app/llm.py` читает его через
+`importlib.resources.files("app").joinpath("prompts", "classifier.md")`.
+Явный `prompt_path` по-прежнему имеет приоритет. В `pyproject.toml` включение
+ресурса задано через `[tool.setuptools.package-data]`; автоматическое включение
+посторонних данных отключено. Директория ресурса не требует нового Python-модуля.
+
+Предыдущие отчёты ниже описывают исторический путь и старый формат JSON;
+актуальные путь и контракт приведены в этом разделе и существующих README.
+
+## Фактические проверки качества
+
+Все итоговые команды выполнены с кодом 0, без отключения правил:
+
+```text
+python -m ruff check .
+All checks passed!
+
+python -m ruff format --check .
+20 files already formatted
+
+python -m mypy
+Success: no issues found in 14 source files
+
+python -m bandit -c pyproject.toml -r app scripts
+No issues identified.
+Total lines of code: 1102
+Low: 0; Medium: 0; High: 0
+Total lines skipped (#nosec): 0
+
+python -m pytest --cov --cov-report=term-missing --cov-report=xml
+collected 200 items
+tests/test_assistant.py: 86 cases
+tests/test_config.py: 20 cases
+tests/test_database.py: 88 cases
+tests/test_main.py: 6 cases
+Required test coverage of 90.0% reached. Total coverage: 96.81%
+200 passed in 4.61s
+```
+
+`app/llm.py` и `app/schemas.py` имеют покрытие 100%. Четырнадцать JSON-примеров
+ресурсного промпта проходят текущую Pydantic-схему. Замечание mypy к выводу типа
+словаря нового теста исправлено явной аннотацией `dict[str, object]`.
+
+## Сборка и проверка wheel вне репозитория
+
+Фактически выполнены команды из корня проекта (интерпретатор проверки — Python 3.12):
+
+```powershell
+.\.venv\Scripts\python.exe -m pip wheel --no-deps --wheel-dir .venv/fixed-wheel-final .
+.\.venv\Scripts\python.exe -m venv .venv/wheel-venv
+.\.venv\wheel-venv\Scripts\python.exe -m pip install .venv/fixed-wheel/shop_assistant-0.1.0-py3-none-any.whl
+.\.venv\wheel-venv\Scripts\python.exe -m pip install --no-deps --force-reinstall .venv/fixed-wheel-final/shop_assistant-0.1.0-py3-none-any.whl
+.\.venv\wheel-venv\Scripts\python.exe -m pip check
+```
+
+Первая сборка уже включала ресурс, но выявила предупреждение setuptools о
+каталоге данных. Конфигурация уточнена: данные включаются явно, без автоматического
+`include-package-data`. Финальная сборка прошла без этого предупреждения.
+В отдельное окружение сначала установлены wheel и его рабочие зависимости,
+затем установлен именно финальный wheel без editable-режима.
+
+Финальный артефакт: `.venv/fixed-wheel-final/shop_assistant-0.1.0-py3-none-any.whl`.
+SHA-256: `730422dcb5f45ceacefcd890d705a6490958115e3a4ee1b3c8b697be55b0b7de`.
+В архиве ровно одна запись `app/prompts/classifier.md`; её байты совпадают
+с единственным исходным файлом.
+
+Отдельный Python запущен с флагом `-I` из временного каталога вне репозитория.
+Переменные `PYTHONPATH`, `PYTHONHOME` и настройки DeepSeek исключены из окружения.
+Проверены импорт из `site-packages` нового venv, wheel-установка без editable,
+совпадение SHA-256 пакетного ресурса, создание классификатора с фиктивным ключом
+без `prompt_path` и приоритет явно переданного тестового файла. Фактический вывод:
+
+```text
+Wheel contains exactly one classifier prompt, matching source
+CWD outside repository: True
+Imported app from isolated wheel environment: True
+Editable installation: False
+Packaged prompt matches single source: True
+Default classifier initialization: OK
+Explicit prompt_path override: OK
+DeepSeek API calls: 0
+WHEEL_CHECK_OK
+```
+
+`pip check` отдельного окружения: `No broken requirements found.`, код 0.
+Артефакт и проверочный venv находятся в игнорируемом `.venv/`; временный рабочий
+каталог вне репозитория удалён после проверки. Исходные Markdown-файлы обновлены,
+новые тестовые модули не создавались.
+
+---
+
+# Классификация запросов покупателей через DeepSeek (предыдущий этап)
 
 Проверено 05.11.2026, Python 3.12.3, HTTPX2 2.16.0, Pydantic 2.14.2.
 Задание: [карточка классификации](https://trello.com/c/k9SxbMts).
